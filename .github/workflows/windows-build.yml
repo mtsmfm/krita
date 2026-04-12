@@ -72,6 +72,7 @@ jobs:
         env:
           KDECI_CACHE_PATH: ${{ github.workspace }}\_cache
           KDECI_CC_CACHE: ${{ github.workspace }}\_ccache
+          KDECI_REPO_METADATA_PATH: ${{ github.workspace }}\krita-deps-management\repo-metadata
         run: |
           git config --global --add safe.directory $env:GITHUB_WORKSPACE
           python -u krita-deps-management/ci-utilities/run-ci-build.py `
