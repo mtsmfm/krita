@@ -41,12 +41,20 @@ jobs:
         with:
           arch: x64
 
+      - name: Fix PATH for build
+        shell: pwsh
+        run: |
+          # Remove MinGW to avoid compiler confusion
+          $cleanPath = ($env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' }) -join ';'
+          # Prepend _install/bin so qtpaths.exe and other tools can find Qt DLLs
+          $installBin = "${{ github.workspace }}\_install\bin"
+          echo "Path=$installBin;$cleanPath" >> $env:GITHUB_ENV
+
       - name: Clone build utilities
         shell: pwsh
         run: |
           git clone https://invent.kde.org/packaging/krita-deps-management.git -b transition.now/qt6 --depth=1
           git clone https://invent.kde.org/packaging/krita-ci-utilities.git krita-deps-management/ci-utilities --depth=1
-          git clone https://invent.kde.org/sysadmin/ci-utilities.git upstream-ci-utilities --depth=1
 
       - name: Install Python dependencies
         shell: pwsh
@@ -63,6 +71,13 @@ jobs:
           key: krita-deps-${{ runner.os }}-${{ hashFiles('krita-deps-management/latest/krita-deps.yml') }}
           restore-keys: krita-deps-${{ runner.os }}-
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: _ccache
+          key: krita-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: krita-ccache-${{ runner.os }}-
+
       - name: Prepare dependency specification
         shell: pwsh
         run: |
@@ -74,17 +89,13 @@ jobs:
             -s branch-corrected-deps.yml `
             -o .kde-ci.yml
 
-      - name: Download dependencies and build Krita
+      - name: Download dependencies, build, and install Krita
         shell: pwsh
         env:
           KDECI_CACHE_PATH: ${{ github.workspace }}\_cache
           KDECI_CC_CACHE: ${{ github.workspace }}\_ccache
           KDECI_REPO_METADATA_PATH: ${{ github.workspace }}\krita-deps-management\repo-metadata
         run: |
-          # Remove MinGW from PATH to prevent compiler confusion
-          $env:Path = ($env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' }) -join ';'
-          # Add deps bin to PATH so qtpaths.exe can find Qt DLLs
-          $env:Path = "${{ github.workspace }}\_install\bin;$env:Path"
           git config --global --add safe.directory $env:GITHUB_WORKSPACE
           python -u krita-deps-management/ci-utilities/run-ci-build.py `
             --project krita `
