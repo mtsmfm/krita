@@ -20,6 +20,8 @@ jobs:
         -DBUILD_TESTING=OFF
         -DBUILD_WITH_QT6=ON
         -DALLOW_UNSTABLE=QT6
+        -DCMAKE_C_COMPILER=cl
+        -DCMAKE_CXX_COMPILER=cl
       KRITACI_SKIP_DEBUG_PACKAGE: 'True'
       KRITACI_BUILD_INSTALLERS: 'False'
       KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
@@ -33,6 +35,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Clone build utilities
         shell: pwsh
@@ -74,6 +81,10 @@ jobs:
           KDECI_CC_CACHE: ${{ github.workspace }}\_ccache
           KDECI_REPO_METADATA_PATH: ${{ github.workspace }}\krita-deps-management\repo-metadata
         run: |
+          # Remove MinGW from PATH to prevent compiler confusion
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' }) -join ';'
+          # Add deps bin to PATH so qtpaths.exe can find Qt DLLs
+          $env:Path = "${{ github.workspace }}\_install\bin;$env:Path"
           git config --global --add safe.directory $env:GITHUB_WORKSPACE
           python -u krita-deps-management/ci-utilities/run-ci-build.py `
             --project krita `
