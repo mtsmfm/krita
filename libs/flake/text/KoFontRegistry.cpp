@@ -114,21 +114,39 @@ public:
         KIS_ASSERT(config && "No Fontconfig support available");
 
         /**
-         * This loads the fontconfig configured on the host Linux system.
+         * On Unix-like systems (Linux, macOS, BSDs, ...) this loads the
+         * fontconfig configuration of the host system.
          *
          * Theoretically, it can cause some version inconsistency problems if
          * the version of fontconfig on the host differs from the version
          * of fontconfig shipped with Krita. But we estimate such risks as
          * negligible.
+         *
+         * The host /etc/fonts check is deliberately skipped on Windows: Qt's
+         * QDir resolves the drive-letter-less path "/etc/fonts" against the
+         * current drive, so when Krita is launched from a WSL-mounted drive
+         * (e.g. Z:\ pointing at \\wsl$\<distro>\) QFile::exists() would pick
+         * up the WSL distro's /etc/fonts/fonts.conf. Krita would then load a
+         * Linux fontconfig configuration on Windows, miss every Windows
+         * system font, and fall back to DejaVu Sans, manifesting as text
+         * mojibake for CJK content.
+         *
+         * The Q_OS_LINUX guard was originally present when this code was
+         * introduced, was widened to cover macOS in fd03fde55f ("Make the
+         * fontconfig config search also check on MacOS"), but was dropped
+         * entirely at the same time without considering Windows.
          */
         if (qgetenv("FONTCONFIG_PATH").isEmpty()) {
+#ifdef Q_OS_UNIX
             QDir appdir("/etc/fonts");
             if (QFile::exists(appdir.absoluteFilePath("fonts.conf"))) {
                 qputenv("FONTCONFIG_PATH", QFile::encodeName(QDir::toNativeSeparators(appdir.absolutePath())));
-            } else {
+            } else
+#endif
+            {
                 // Otherwise use default, which is defined in src/fcinit.c , windows and macos
                 // default locations *are* defined in fontconfig's meson build system.
-                appdir = QDir(KoResourcePaths::getApplicationRoot() +"/etc/fonts");
+                QDir appdir(KoResourcePaths::getApplicationRoot() + "/etc/fonts");
                 if (QFile::exists(appdir.absoluteFilePath("fonts.conf"))) {
                     qputenv("FONTCONFIG_PATH", QFile::encodeName(QDir::toNativeSeparators(appdir.absolutePath())));
                 }

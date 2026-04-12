@@ -1,0 +1,110 @@
+name: Windows Build
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  windows-build-qt6:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      KDECI_BUILD_TYPE: Release
+      KDECI_GITLAB_SERVER: https://invent.kde.org/
+      KDECI_PACKAGE_PROJECT: teams/ci-artifacts/krita-windows
+      KDECI_COMPRESS_PACKAGES_ON_DOWNLOAD: 'False'
+      KDECI_EXTRA_CMAKE_ARGS: >-
+        -DHIDE_SAFE_ASSERTS=OFF
+        -DBUILD_TESTING=OFF
+        -DBUILD_WITH_QT6=ON
+        -DALLOW_UNSTABLE=QT6
+      KRITACI_SKIP_DEBUG_PACKAGE: 'True'
+      KRITACI_BUILD_INSTALLERS: 'False'
+      KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
+      PYTHONUTF8: '1'
+
+    steps:
+      - name: Checkout Krita
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Clone build utilities
+        shell: pwsh
+        run: |
+          git clone https://invent.kde.org/packaging/krita-deps-management.git -b transition.now/qt6 --depth=1
+          git clone https://invent.kde.org/packaging/krita-ci-utilities.git krita-deps-management/ci-utilities --depth=1
+          git clone https://invent.kde.org/sysadmin/ci-utilities.git upstream-ci-utilities --depth=1
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: pip install -r krita-deps-management/requirements.txt
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y
+
+      - name: Cache downloaded packages
+        uses: actions/cache@v4
+        with:
+          path: _cache
+          key: krita-deps-${{ runner.os }}-${{ hashFiles('krita-deps-management/latest/krita-deps.yml') }}
+          restore-keys: krita-deps-${{ runner.os }}-
+
+      - name: Prepare dependency specification
+        shell: pwsh
+        run: |
+          python -u krita-deps-management/tools/replace-branch-in-seed-file.py `
+            krita-deps-management/latest/krita-deps.yml `
+            -p -o branch-corrected-deps.yml `
+            -d transition.now/qt6
+          python -u krita-deps-management/tools/generate-deps-file.py `
+            -s branch-corrected-deps.yml `
+            -o .kde-ci.yml
+
+      - name: Download dependencies and build Krita
+        shell: pwsh
+        env:
+          KDECI_CACHE_PATH: ${{ github.workspace }}\_cache
+          KDECI_CC_CACHE: ${{ github.workspace }}\_ccache
+        run: |
+          git config --global --add safe.directory $env:GITHUB_WORKSPACE
+          python -u krita-deps-management/ci-utilities/run-ci-build.py `
+            --project krita `
+            --branch $env:GITHUB_REF_NAME `
+            --platform Windows/Qt6/Shared `
+            --skip-publishing `
+            2>&1 | Tee-Object -FilePath build-krita.log
+
+      - name: Package Krita
+        shell: pwsh
+        env:
+          CI_COMMIT_SHORT_SHA: ${{ github.sha }}
+        run: |
+          python -u build-tools/ci-scripts/build-windows-package.py `
+            2>&1 | Tee-Object -FilePath build-package.log
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: krita-windows
+          path: |
+            krita-*.zip
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            *.log
+            _build/CMakeFiles/CMakeConfigureLog.yaml
+            _build/CMakeCache.txt
+          retention-days: 3
