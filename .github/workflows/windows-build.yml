@@ -20,8 +20,8 @@ jobs:
         -DBUILD_TESTING=OFF
         -DBUILD_WITH_QT6=ON
         -DALLOW_UNSTABLE=QT6
-        -DCMAKE_C_COMPILER=cl
-        -DCMAKE_CXX_COMPILER=cl
+        -DCMAKE_C_COMPILER=clang-cl
+        -DCMAKE_CXX_COMPILER=clang-cl
       KRITACI_SKIP_DEBUG_PACKAGE: 'True'
       KRITACI_BUILD_INSTALLERS: 'False'
       KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
@@ -41,12 +41,16 @@ jobs:
         with:
           arch: x64
 
+      - name: Install LLVM 18
+        shell: pwsh
+        run: |
+          choco install llvm --version=18.1.8 -y --no-progress
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+
       - name: Fix PATH for build
         shell: pwsh
         run: |
-          # Remove MinGW to avoid compiler confusion
           $cleanPath = ($env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' }) -join ';'
-          # Prepend _install/bin so qtpaths.exe and other tools can find Qt DLLs
           $installBin = "${{ github.workspace }}\_install\bin"
           echo "Path=$installBin;$cleanPath" >> $env:GITHUB_ENV
 
@@ -62,7 +66,7 @@ jobs:
 
       - name: Install Ninja
         shell: pwsh
-        run: choco install ninja -y
+        run: choco install ninja -y --no-progress
 
       - name: Cache downloaded packages
         uses: actions/cache@v4
@@ -103,26 +107,6 @@ jobs:
             --platform Windows/Qt6/Shared `
             --skip-publishing `
             2>&1 | Tee-Object -FilePath build-krita.log
-
-      - name: Diagnose qtpaths DLL issue
-        if: failure()
-        shell: pwsh
-        run: |
-          echo "=== Files in _install\bin (first 50) ==="
-          Get-ChildItem _install\bin -ErrorAction SilentlyContinue | Select-Object -First 50
-          echo ""
-          echo "=== Qt6*.dll in _install ==="
-          Get-ChildItem _install -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
-          echo ""
-          echo "=== qtpaths.exe dependencies ==="
-          dumpbin /dependents _install\bin\qtpaths.exe 2>&1
-          echo ""
-          echo "=== Try running qtpaths.exe ==="
-          & _install\bin\qtpaths.exe --query QT_INSTALL_PREFIX 2>&1
-          echo "Exit code: $LASTEXITCODE"
-          echo ""
-          echo "=== PATH (first 10 entries) ==="
-          $env:Path -split ';' | Select-Object -First 10
 
       - name: Package Krita
         shell: pwsh
