@@ -104,6 +104,26 @@ jobs:
             --skip-publishing `
             2>&1 | Tee-Object -FilePath build-krita.log
 
+      - name: Diagnose qtpaths DLL issue
+        if: failure()
+        shell: pwsh
+        run: |
+          echo "=== Files in _install\bin (first 50) ==="
+          Get-ChildItem _install\bin -ErrorAction SilentlyContinue | Select-Object -First 50
+          echo ""
+          echo "=== Qt6*.dll in _install ==="
+          Get-ChildItem _install -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
+          echo ""
+          echo "=== qtpaths.exe dependencies ==="
+          dumpbin /dependents _install\bin\qtpaths.exe 2>&1
+          echo ""
+          echo "=== Try running qtpaths.exe ==="
+          & _install\bin\qtpaths.exe --query QT_INSTALL_PREFIX 2>&1
+          echo "Exit code: $LASTEXITCODE"
+          echo ""
+          echo "=== PATH (first 10 entries) ==="
+          $env:Path -split ';' | Select-Object -First 10
+
       - name: Package Krita
         shell: pwsh
         env:
