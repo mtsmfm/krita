@@ -39,11 +39,49 @@ jobs:
       - name: Install MSYS2 CLANG64 toolchain
         shell: pwsh
         run: |
+          # Install non-compiler tools from current repo
           C:\msys64\usr\bin\pacman.exe -Sy --noconfirm --needed `
             mingw-w64-clang-x86_64-toolchain `
             mingw-w64-clang-x86_64-cmake `
             mingw-w64-clang-x86_64-ninja `
             mingw-w64-clang-x86_64-ccache
+
+      - name: Pin clang to version 18.1.8
+        shell: pwsh
+        run: |
+          # KDE Windows deps (boost 1.80) are incompatible with clang 22's
+          # stricter constexpr rules. Downgrade clang/llvm/libc++ to 18.1.8
+          # by fetching historical packages from MSYS2's SourceForge archive.
+          # Use SF's RSS feed which supports large limits and unpaginated results
+          $rssUrl = "https://sourceforge.net/projects/msys2/rss?path=/REPOS/MINGW/clang64&limit=9999"
+          $listing = Invoke-WebRequest -Uri $rssUrl -UseBasicParsing
+          # Extract filenames matching 18.1.8
+          $pattern = 'mingw-w64-clang-x86_64-(?:llvm|llvm-libs|clang|clang-libs|clang-tools-extra|lld|compiler-rt|libc\+\+|libunwind|openmp|polly|mlir)-18\.1\.8-\d+-any\.pkg\.tar\.zst'
+          $matches = [regex]::Matches($listing.Content, $pattern) | ForEach-Object { $_.Value } | Sort-Object -Unique
+          if ($matches.Count -eq 0) {
+            Write-Host "Listing content snippet:"
+            $listing.Content.Substring(0, [Math]::Min(2000, $listing.Content.Length))
+            throw "Could not find any clang 18.1.8 packages on SourceForge"
+          }
+          Write-Host "Found packages:"
+          $matches | ForEach-Object { Write-Host "  $_" }
+
+          $downloadDir = "$env:GITHUB_WORKSPACE\pinned-pkgs"
+          New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+          $localFiles = @()
+          foreach ($filename in $matches) {
+            $url = "https://master.dl.sourceforge.net/project/msys2/REPOS/MINGW/clang64/$filename"
+            $outFile = Join-Path $downloadDir $filename
+            Write-Host "Downloading $url"
+            Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
+            $localFiles += $outFile
+          }
+
+          # pacman accepts Windows-style paths directly
+          C:\msys64\usr\bin\pacman.exe -U --noconfirm $localFiles
+
+          Write-Host "=== clang version after pinning ==="
+          & C:\msys64\clang64\bin\clang.exe --version
 
       - name: Fix PATH for build
         shell: pwsh
