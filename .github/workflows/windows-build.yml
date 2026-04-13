@@ -108,6 +108,31 @@ jobs:
             --skip-publishing `
             2>&1 | Tee-Object -FilePath build-krita.log
 
+      - name: Diagnose qtpaths on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $qtpaths = "${{ github.workspace }}\_install\bin\qtpaths.exe"
+          Write-Host "=== PATH ==="
+          $env:Path -split ';' | ForEach-Object { Write-Host $_ }
+          Write-Host "=== qtpaths location ==="
+          if (Test-Path $qtpaths) {
+            Write-Host "Found: $qtpaths"
+            Write-Host "=== _install\bin contents ==="
+            Get-ChildItem "${{ github.workspace }}\_install\bin" | Select-Object Name | Format-Table -AutoSize
+            Write-Host "=== dumpbin /dependents qtpaths.exe ==="
+            & dumpbin /dependents $qtpaths
+            Write-Host "=== direct qtpaths invocation ==="
+            $ErrorActionPreference = 'Continue'
+            try { & $qtpaths --query QT_INSTALL_PREFIX 2>&1 | Out-Host } catch { Write-Host "Error: $_" }
+            Write-Host "ExitCode: $LASTEXITCODE"
+            Write-Host "=== libc++.dll search ==="
+            Get-ChildItem -Path "C:\Program Files\LLVM" -Recurse -Filter "libc++*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
+            Get-ChildItem -Path "${{ github.workspace }}\_install" -Recurse -Filter "libc++*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
+          } else {
+            Write-Host "qtpaths.exe not found at $qtpaths"
+          }
+
       - name: Package Krita
         shell: pwsh
         env:
