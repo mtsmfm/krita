@@ -44,7 +44,7 @@ jobs:
       - name: Install LLVM 18
         shell: pwsh
         run: |
-          choco install llvm --version=18.1.8 -y --no-progress
+          choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade --force
           echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
 
       - name: Fix PATH for build
