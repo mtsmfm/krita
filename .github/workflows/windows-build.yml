@@ -20,8 +20,8 @@ jobs:
         -DBUILD_TESTING=OFF
         -DBUILD_WITH_QT6=ON
         -DALLOW_UNSTABLE=QT6
-        -DCMAKE_C_COMPILER=clang-cl
-        -DCMAKE_CXX_COMPILER=clang-cl
+        -DCMAKE_C_COMPILER=clang
+        -DCMAKE_CXX_COMPILER=clang++
       KRITACI_SKIP_DEBUG_PACKAGE: 'True'
       KRITACI_BUILD_INSTALLERS: 'False'
       KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
@@ -36,23 +36,25 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install LLVM 18
+      - name: Install MSYS2 CLANG64 toolchain
         shell: pwsh
         run: |
-          choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade --force
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          C:\msys64\usr\bin\pacman.exe -Sy --noconfirm --needed `
+            mingw-w64-clang-x86_64-toolchain `
+            mingw-w64-clang-x86_64-cmake `
+            mingw-w64-clang-x86_64-ninja `
+            mingw-w64-clang-x86_64-ccache
 
       - name: Fix PATH for build
         shell: pwsh
         run: |
-          $cleanPath = ($env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' }) -join ';'
+          # Remove any other mingw/llvm from PATH, prepend CLANG64 and _install\bin.
+          $cleanPath = ($env:Path -split ';' | Where-Object {
+            $_ -notmatch 'mingw' -and $_ -notmatch 'Strawberry' -and $_ -notmatch 'LLVM'
+          }) -join ';'
           $installBin = "${{ github.workspace }}\_install\bin"
-          echo "Path=$installBin;$cleanPath" >> $env:GITHUB_ENV
+          $clang64Bin = "C:\msys64\clang64\bin"
+          echo "Path=$installBin;$clang64Bin;$cleanPath" >> $env:GITHUB_ENV
 
       - name: Clone build utilities
         shell: pwsh
@@ -63,10 +65,6 @@ jobs:
       - name: Install Python dependencies
         shell: pwsh
         run: pip install -r krita-deps-management/requirements.txt
-
-      - name: Install Ninja
-        shell: pwsh
-        run: choco install ninja -y --no-progress
 
       - name: Cache downloaded packages
         uses: actions/cache@v4
@@ -115,20 +113,15 @@ jobs:
           $qtpaths = "${{ github.workspace }}\_install\bin\qtpaths.exe"
           Write-Host "=== PATH ==="
           $env:Path -split ';' | ForEach-Object { Write-Host $_ }
-          Write-Host "=== qtpaths location ==="
+          Write-Host "=== clang version ==="
+          & clang --version
           if (Test-Path $qtpaths) {
-            Write-Host "Found: $qtpaths"
-            Write-Host "=== _install\bin contents ==="
-            Get-ChildItem "${{ github.workspace }}\_install\bin" | Select-Object Name | Format-Table -AutoSize
-            Write-Host "=== dumpbin /dependents qtpaths.exe ==="
-            & dumpbin /dependents $qtpaths
+            Write-Host "=== qtpaths deps ==="
+            & "C:\msys64\clang64\bin\ldd.exe" $qtpaths 2>&1 | Out-Host
             Write-Host "=== direct qtpaths invocation ==="
             $ErrorActionPreference = 'Continue'
-            try { & $qtpaths --query QT_INSTALL_PREFIX 2>&1 | Out-Host } catch { Write-Host "Error: $_" }
+            & $qtpaths --query QT_INSTALL_PREFIX 2>&1 | Out-Host
             Write-Host "ExitCode: $LASTEXITCODE"
-            Write-Host "=== libc++.dll search ==="
-            Get-ChildItem -Path "C:\Program Files\LLVM" -Recurse -Filter "libc++*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
-            Get-ChildItem -Path "${{ github.workspace }}\_install" -Recurse -Filter "libc++*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
           } else {
             Write-Host "qtpaths.exe not found at $qtpaths"
           }
