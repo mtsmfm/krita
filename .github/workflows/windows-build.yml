@@ -46,84 +46,6 @@ jobs:
             mingw-w64-clang-x86_64-ninja `
             mingw-w64-clang-x86_64-ccache
 
-      - name: Pin clang to version 18.1.8
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # KDE Windows deps (boost 1.80) are incompatible with clang 22's
-          # stricter constexpr rules. Downgrade clang/llvm/libc++ to 18.1.8
-          # by fetching historical packages from msys2/msys2-autobuild GitHub
-          # releases (which retain assets even after repo.msys2.org rotates).
-          $wanted = @(
-            'mingw-w64-clang-x86_64-llvm-libs',
-            'mingw-w64-clang-x86_64-llvm',
-            'mingw-w64-clang-x86_64-clang-libs',
-            'mingw-w64-clang-x86_64-clang',
-            'mingw-w64-clang-x86_64-lld',
-            'mingw-w64-clang-x86_64-libc++',
-            'mingw-w64-clang-x86_64-compiler-rt',
-            'mingw-w64-clang-x86_64-libunwind',
-            'mingw-w64-clang-x86_64-openmp',
-            'mingw-w64-clang-x86_64-polly'
-          )
-          $patterns = $wanted | ForEach-Object {
-            [regex]::Escape($_) + '-18\.1\.8-\d+-any\.pkg\.tar\.zst$'
-          }
-          $combined = '^(' + ($patterns -join '|') + ')'
-
-          $downloadDir = "$env:GITHUB_WORKSPACE\pinned-pkgs"
-          New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
-          $found = @{}
-          $page = 1
-          $maxPages = 200
-
-          while ($page -le $maxPages) {
-            Write-Host "Fetching releases page $page..."
-            $json = gh api "/repos/msys2/msys2-autobuild/releases?per_page=100&page=$page" 2>$null
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) { break }
-            $releases = $json | ConvertFrom-Json
-            if ($releases.Count -eq 0) { break }
-            foreach ($rel in $releases) {
-              foreach ($asset in $rel.assets) {
-                if ($asset.name -match $combined) {
-                  # Extract the package name (part before the version)
-                  $m = [regex]::Match($asset.name, '^(mingw-w64-clang-x86_64-[^-]+(?:\+\+)?(?:-libs)?)-18\.1\.8')
-                  if ($m.Success) {
-                    $key = $m.Groups[1].Value
-                    if (-not $found.ContainsKey($key)) {
-                      Write-Host "Found $($asset.name) in release $($rel.tag_name)"
-                      $outFile = Join-Path $downloadDir $asset.name
-                      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $outFile -UseBasicParsing
-                      $found[$key] = $outFile
-                    }
-                  }
-                }
-              }
-            }
-            # Early exit once core packages are collected
-            $coreFound = @('mingw-w64-clang-x86_64-clang', 'mingw-w64-clang-x86_64-llvm', 'mingw-w64-clang-x86_64-libc++') |
-              Where-Object { $found.ContainsKey($_) }
-            if ($coreFound.Count -eq 3 -and $found.Count -ge 6) {
-              Write-Host "Collected enough core packages ($($found.Count)), stopping pagination."
-              break
-            }
-            $page++
-          }
-
-          Write-Host "=== Found $($found.Count) packages ==="
-          $found.Keys | Sort-Object | ForEach-Object { Write-Host "  $_" }
-
-          if ($found.Count -eq 0) {
-            throw "No clang 18.1.8 packages found in msys2-autobuild releases"
-          }
-
-          $localFiles = @($found.Values)
-          C:\msys64\usr\bin\pacman.exe -U --noconfirm $localFiles
-
-          Write-Host "=== clang version after pinning ==="
-          & C:\msys64\clang64\bin\clang.exe --version
-
       - name: Fix PATH for build
         shell: pwsh
         run: |
@@ -170,7 +92,7 @@ jobs:
             -s branch-corrected-deps.yml `
             -o .kde-ci.yml
 
-      - name: Download dependencies, build, and install Krita
+      - name: Fetch dependencies
         shell: pwsh
         env:
           KDECI_CACHE_PATH: ${{ github.workspace }}\_cache
@@ -183,6 +105,46 @@ jobs:
             --branch $env:GITHUB_REF_NAME `
             --platform Windows/Qt6/Shared `
             --skip-publishing `
+            --only-deps `
+            2>&1 | Tee-Object -FilePath fetch-deps.log
+
+      - name: Patch boost 1.80 headers for clang 22 constexpr strictness
+        shell: pwsh
+        run: |
+          # boost 1.80's BOOST_STATIC_CONSTANT expands to `static const T value = N;`
+          # which clang 22 rejects in some template instantiations with
+          # "in-class initializer for static data member is not a constant expression".
+          # Patch the macro definition in boost/config/detail/suffix.hpp to use
+          # `static constexpr` instead, which is valid in the same contexts.
+          $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\config\detail\suffix.hpp"
+          if (-not (Test-Path $header)) {
+            throw "Expected boost header not found: $header"
+          }
+          $content = Get-Content -Raw -Path $header
+          $old = '#     define BOOST_STATIC_CONSTANT(type, assignment) static const type assignment'
+          $new = '#     define BOOST_STATIC_CONSTANT(type, assignment) static constexpr type assignment'
+          if (-not $content.Contains($old)) {
+            throw "BOOST_STATIC_CONSTANT definition not found in suffix.hpp"
+          }
+          $patched = $content.Replace($old, $new)
+          Set-Content -Path $header -Value $patched -NoNewline
+          Write-Host "Patched $header"
+          Select-String -Path $header -Pattern 'BOOST_STATIC_CONSTANT\(type' | Out-Host
+
+      - name: Build and install Krita
+        shell: pwsh
+        env:
+          KDECI_CACHE_PATH: ${{ github.workspace }}\_cache
+          KDECI_CC_CACHE: ${{ github.workspace }}\_ccache
+          KDECI_REPO_METADATA_PATH: ${{ github.workspace }}\krita-deps-management\repo-metadata
+        run: |
+          python -u krita-deps-management/ci-utilities/run-ci-build.py `
+            --project krita `
+            --branch $env:GITHUB_REF_NAME `
+            --platform Windows/Qt6/Shared `
+            --skip-publishing `
+            --only-build `
+            --skip-dependencies-fetch `
             2>&1 | Tee-Object -FilePath build-krita.log
 
       - name: Diagnose qtpaths on failure
