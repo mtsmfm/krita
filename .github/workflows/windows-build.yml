@@ -48,36 +48,77 @@ jobs:
 
       - name: Pin clang to version 18.1.8
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # KDE Windows deps (boost 1.80) are incompatible with clang 22's
           # stricter constexpr rules. Downgrade clang/llvm/libc++ to 18.1.8
-          # by fetching historical packages from MSYS2's SourceForge archive.
-          # Use SF's RSS feed which supports large limits and unpaginated results
-          $rssUrl = "https://sourceforge.net/projects/msys2/rss?path=/REPOS/MINGW/clang64&limit=9999"
-          $listing = Invoke-WebRequest -Uri $rssUrl -UseBasicParsing
-          # Extract filenames matching 18.1.8
-          $pattern = 'mingw-w64-clang-x86_64-(?:llvm|llvm-libs|clang|clang-libs|clang-tools-extra|lld|compiler-rt|libc\+\+|libunwind|openmp|polly|mlir)-18\.1\.8-\d+-any\.pkg\.tar\.zst'
-          $matches = [regex]::Matches($listing.Content, $pattern) | ForEach-Object { $_.Value } | Sort-Object -Unique
-          if ($matches.Count -eq 0) {
-            Write-Host "Listing content snippet:"
-            $listing.Content.Substring(0, [Math]::Min(2000, $listing.Content.Length))
-            throw "Could not find any clang 18.1.8 packages on SourceForge"
+          # by fetching historical packages from msys2/msys2-autobuild GitHub
+          # releases (which retain assets even after repo.msys2.org rotates).
+          $wanted = @(
+            'mingw-w64-clang-x86_64-llvm-libs',
+            'mingw-w64-clang-x86_64-llvm',
+            'mingw-w64-clang-x86_64-clang-libs',
+            'mingw-w64-clang-x86_64-clang',
+            'mingw-w64-clang-x86_64-lld',
+            'mingw-w64-clang-x86_64-libc++',
+            'mingw-w64-clang-x86_64-compiler-rt',
+            'mingw-w64-clang-x86_64-libunwind',
+            'mingw-w64-clang-x86_64-openmp',
+            'mingw-w64-clang-x86_64-polly'
+          )
+          $patterns = $wanted | ForEach-Object {
+            [regex]::Escape($_) + '-18\.1\.8-\d+-any\.pkg\.tar\.zst$'
           }
-          Write-Host "Found packages:"
-          $matches | ForEach-Object { Write-Host "  $_" }
+          $combined = '^(' + ($patterns -join '|') + ')'
 
           $downloadDir = "$env:GITHUB_WORKSPACE\pinned-pkgs"
           New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
-          $localFiles = @()
-          foreach ($filename in $matches) {
-            $url = "https://master.dl.sourceforge.net/project/msys2/REPOS/MINGW/clang64/$filename"
-            $outFile = Join-Path $downloadDir $filename
-            Write-Host "Downloading $url"
-            Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
-            $localFiles += $outFile
+          $found = @{}
+          $page = 1
+          $maxPages = 200
+
+          while ($page -le $maxPages) {
+            Write-Host "Fetching releases page $page..."
+            $json = gh api "/repos/msys2/msys2-autobuild/releases?per_page=100&page=$page" 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) { break }
+            $releases = $json | ConvertFrom-Json
+            if ($releases.Count -eq 0) { break }
+            foreach ($rel in $releases) {
+              foreach ($asset in $rel.assets) {
+                if ($asset.name -match $combined) {
+                  # Extract the package name (part before the version)
+                  $m = [regex]::Match($asset.name, '^(mingw-w64-clang-x86_64-[^-]+(?:\+\+)?(?:-libs)?)-18\.1\.8')
+                  if ($m.Success) {
+                    $key = $m.Groups[1].Value
+                    if (-not $found.ContainsKey($key)) {
+                      Write-Host "Found $($asset.name) in release $($rel.tag_name)"
+                      $outFile = Join-Path $downloadDir $asset.name
+                      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $outFile -UseBasicParsing
+                      $found[$key] = $outFile
+                    }
+                  }
+                }
+              }
+            }
+            # Early exit once core packages are collected
+            $coreFound = @('mingw-w64-clang-x86_64-clang', 'mingw-w64-clang-x86_64-llvm', 'mingw-w64-clang-x86_64-libc++') |
+              Where-Object { $found.ContainsKey($_) }
+            if ($coreFound.Count -eq 3 -and $found.Count -ge 6) {
+              Write-Host "Collected enough core packages ($($found.Count)), stopping pagination."
+              break
+            }
+            $page++
           }
 
-          # pacman accepts Windows-style paths directly
+          Write-Host "=== Found $($found.Count) packages ==="
+          $found.Keys | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+          if ($found.Count -eq 0) {
+            throw "No clang 18.1.8 packages found in msys2-autobuild releases"
+          }
+
+          $localFiles = @($found.Values)
           C:\msys64\usr\bin\pacman.exe -U --noconfirm $localFiles
 
           Write-Host "=== clang version after pinning ==="
