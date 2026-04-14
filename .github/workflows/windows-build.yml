@@ -108,28 +108,29 @@ jobs:
             --only-deps `
             2>&1 | Tee-Object -FilePath fetch-deps.log
 
-      - name: Patch boost 1.80 headers for clang 22 constexpr strictness
+      - name: Patch boost 1.80 integral_wrapper.hpp for clang 22
         shell: pwsh
         run: |
-          # boost 1.80's BOOST_STATIC_CONSTANT expands to `static const T value = N;`
-          # which clang 22 rejects in some template instantiations with
-          # "in-class initializer for static data member is not a constant expression".
-          # Patch the macro definition in boost/config/detail/suffix.hpp to use
-          # `static constexpr` instead, which is valid in the same contexts.
-          $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\config\detail\suffix.hpp"
+          # clang 22 rejects `static const T value = N;` (boost's
+          # BOOST_STATIC_CONSTANT expansion) with "in-class initializer for
+          # static data member is not a constant expression" in integral_wrapper.
+          # Targeted fix: rewrite just that one line to use `static constexpr`,
+          # leaving next_value/prior_value alone (those contain arithmetic that
+          # would newly break under constexpr evaluation for some instantiations).
+          $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\mpl\aux_\integral_wrapper.hpp"
           if (-not (Test-Path $header)) {
             throw "Expected boost header not found: $header"
           }
           $content = Get-Content -Raw -Path $header
-          $old = '#     define BOOST_STATIC_CONSTANT(type, assignment) static const type assignment'
-          $new = '#     define BOOST_STATIC_CONSTANT(type, assignment) static constexpr type assignment'
+          $old = 'BOOST_STATIC_CONSTANT(AUX_WRAPPER_VALUE_TYPE, value = N);'
+          $new = 'static constexpr AUX_WRAPPER_VALUE_TYPE value = N;'
           if (-not $content.Contains($old)) {
-            throw "BOOST_STATIC_CONSTANT definition not found in suffix.hpp"
+            throw "Target line not found in integral_wrapper.hpp"
           }
           $patched = $content.Replace($old, $new)
           Set-Content -Path $header -Value $patched -NoNewline
           Write-Host "Patched $header"
-          Select-String -Path $header -Pattern 'BOOST_STATIC_CONSTANT\(type' | Out-Host
+          Select-String -Path $header -Pattern 'value = N|prior_value|next_value' | Out-Host
 
       - name: Build and install Krita
         shell: pwsh
