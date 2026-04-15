@@ -22,6 +22,11 @@ jobs:
         -DALLOW_UNSTABLE=QT6
         -DCMAKE_C_COMPILER=clang
         -DCMAKE_CXX_COMPILER=clang++
+      # Clang 16+ escalated -Wenum-constexpr-conversion to a hard error. Boost
+      # 1.80's mpl integral_wrapper does `enum(0) - 1` in integral_c<enum, 0>::prior
+      # which is out-of-range for restricted enums (e.g. GSL's udt_builtin_mixture_enum).
+      # Downgrade back to a warning so constant evaluation succeeds.
+      CXXFLAGS: '-Wno-enum-constexpr-conversion'
       KRITACI_SKIP_DEBUG_PACKAGE: 'True'
       KRITACI_BUILD_INSTALLERS: 'False'
       KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
@@ -107,30 +112,6 @@ jobs:
             --skip-publishing `
             --only-deps `
             2>&1 | Tee-Object -FilePath fetch-deps.log
-
-      - name: Patch boost 1.80 integral_wrapper.hpp for clang 22
-        shell: pwsh
-        run: |
-          # clang 22 rejects `static const T value = N;` (boost's
-          # BOOST_STATIC_CONSTANT expansion) with "in-class initializer for
-          # static data member is not a constant expression" in integral_wrapper.
-          # Targeted fix: rewrite just that one line to use `static constexpr`,
-          # leaving next_value/prior_value alone (those contain arithmetic that
-          # would newly break under constexpr evaluation for some instantiations).
-          $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\mpl\aux_\integral_wrapper.hpp"
-          if (-not (Test-Path $header)) {
-            throw "Expected boost header not found: $header"
-          }
-          $content = Get-Content -Raw -Path $header
-          $old = 'BOOST_STATIC_CONSTANT(AUX_WRAPPER_VALUE_TYPE, value = N);'
-          $new = 'static constexpr AUX_WRAPPER_VALUE_TYPE value = N;'
-          if (-not $content.Contains($old)) {
-            throw "Target line not found in integral_wrapper.hpp"
-          }
-          $patched = $content.Replace($old, $new)
-          Set-Content -Path $header -Value $patched -NoNewline
-          Write-Host "Patched $header"
-          Select-String -Path $header -Pattern 'value = N|prior_value|next_value' | Out-Host
 
       - name: Build and install Krita
         shell: pwsh
