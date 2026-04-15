@@ -22,6 +22,14 @@ jobs:
         -DALLOW_UNSTABLE=QT6
         -DCMAKE_C_COMPILER=clang
         -DCMAKE_CXX_COMPILER=clang++
+      # KDE Windows deps ship boost 1.80, whose mpl integral_wrapper expands
+      # `static const enum_t prior_value = enum_t(0) - 1;` for some instantiations.
+      # Clang 16+ rejects this as a non-constant expression because -1 is
+      # outside the valid range of the enum (e.g. udt_builtin_mixture_enum).
+      # Force boost to use its alternative `enum { value = N }` form, which is
+      # an unnamed enumerator with int promotion and bypasses the strict
+      # enum-range constexpr check entirely.
+      CXXFLAGS: '-DBOOST_NO_INCLASS_MEMBER_INITIALIZATION'
       KRITACI_SKIP_DEBUG_PACKAGE: 'True'
       KRITACI_BUILD_INSTALLERS: 'False'
       KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
