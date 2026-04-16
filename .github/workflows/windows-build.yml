@@ -22,14 +22,6 @@ jobs:
         -DALLOW_UNSTABLE=QT6
         -DCMAKE_C_COMPILER=clang
         -DCMAKE_CXX_COMPILER=clang++
-      # KDE Windows deps ship boost 1.80, whose mpl integral_wrapper expands
-      # `static const enum_t prior_value = enum_t(0) - 1;` for some instantiations.
-      # Clang 16+ rejects this as a non-constant expression because -1 is
-      # outside the valid range of the enum (e.g. udt_builtin_mixture_enum).
-      # Force boost to use its alternative `enum { value = N }` form, which is
-      # an unnamed enumerator with int promotion and bypasses the strict
-      # enum-range constexpr check entirely.
-      CXXFLAGS: '-DBOOST_NO_INCLASS_MEMBER_INITIALIZATION'
       KRITACI_SKIP_DEBUG_PACKAGE: 'True'
       KRITACI_BUILD_INSTALLERS: 'False'
       KRITACI_SKIP_UPLOAD_NIGHTLY_PACKAGE: 'True'
@@ -115,6 +107,47 @@ jobs:
             --skip-publishing `
             --only-deps `
             2>&1 | Tee-Object -FilePath fetch-deps.log
+
+      - name: Patch boost 1.80 for clang 22 enum-constexpr issue
+        shell: pwsh
+        run: |
+          # Clang 22 rejects integral_c<enum_t, 0>::prior because it tries to
+          # instantiate integral_c<enum_t, -1> where -1 is outside the enum's
+          # valid range — a non-constant expression per C++17.
+          # Fix: replace prior/next typedefs with self-type references.
+          # mpl::prior / mpl::next on these enum integral_c types are never
+          # actually called in Krita's code path (boost::numeric::conversion
+          # only checks equality, not iteration).
+          $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\mpl\aux_\integral_wrapper.hpp"
+          if (-not (Test-Path $header)) {
+            throw "Header not found: $header"
+          }
+          $content = Get-Content -Raw $header
+          # Replace the #else branch that computes next/prior via arithmetic.
+          # This is lines 71-73 of the original file:
+          #   typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(AUX_WRAPPER_VALUE_TYPE, (value + 1)) ) next;
+          #   typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(AUX_WRAPPER_VALUE_TYPE, (value - 1)) ) prior;
+          $old = @'
+    typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(AUX_WRAPPER_VALUE_TYPE, (value + 1)) ) next;
+    typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(AUX_WRAPPER_VALUE_TYPE, (value - 1)) ) prior;
+'@
+          $new = @'
+    // Patched: avoid out-of-range enum NTTP instantiation (clang 22+)
+    typedef AUX_WRAPPER_NAME next;
+    typedef AUX_WRAPPER_NAME prior;
+'@
+          if (-not $content.Contains($old)) {
+            # Try with different whitespace
+            $old2 = 'typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(AUX_WRAPPER_VALUE_TYPE, (value + 1)) ) next;'
+            if (-not $content.Contains($old2)) {
+              Write-Host "=== Header content (lines 65-80) ==="
+              (Get-Content $header)[64..79] | ForEach-Object { Write-Host $_ }
+              throw "Target pattern not found in integral_wrapper.hpp"
+            }
+          }
+          $patched = $content.Replace($old, $new)
+          Set-Content -Path $header -Value $patched -NoNewline
+          Write-Host "Patched $header successfully"
 
       - name: Build and install Krita
         shell: pwsh
