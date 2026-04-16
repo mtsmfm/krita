@@ -114,41 +114,36 @@ jobs:
           $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\mpl\aux_\integral_wrapper.hpp"
           if (-not (Test-Path $header)) { throw "Header not found: $header" }
           $lines = Get-Content $header
+          Write-Host "=== Lines 55-80 BEFORE patch ==="
+          for ($j = 54; $j -lt [Math]::Min(80, $lines.Count); $j++) {
+            Write-Host ("{0,3}: {1}" -f ($j+1), $lines[$j])
+          }
+          # Only patch the active #else branch (value+1 / value-1).
+          # EDG and Borland branches are inactive for clang and must NOT be touched
+          # (other boost code depends on mpl::prior/next working for integer types).
+          $inElseBranch = $false
           $patched = 0
           for ($i = 0; $i -lt $lines.Count; $i++) {
-            # Patch all branches: EDG workaround (N+1/N-1), Borland (N+1/N-1), and default (value+1/value-1)
-            # EDG branch: BOOST_STATIC_CONSTANT lines for next_value/prior_value
-            if ($lines[$i] -match 'BOOST_STATIC_CONSTANT\(AUX_WRAPPER_VALUE_TYPE,\s*next_value') {
-              $lines[$i] = '    // patched: removed next_value computation (clang 22 enum-constexpr)'
-              $patched++
-            }
-            if ($lines[$i] -match 'BOOST_STATIC_CONSTANT\(AUX_WRAPPER_VALUE_TYPE,\s*prior_value') {
-              $lines[$i] = '    // patched: removed prior_value computation (clang 22 enum-constexpr)'
-              $patched++
-            }
-            # All branches: typedef using next_value/prior_value or arithmetic
-            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(next_value\) next;') {
-              $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
-              $patched++
-            }
-            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(prior_value\) prior;') {
-              $lines[$i] = '    typedef AUX_WRAPPER_NAME prior;  // patched for clang 22'
-              $patched++
-            }
-            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(\s*BOOST_MPL_AUX_STATIC_CAST.*\+ 1\).*next;') {
-              $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
-              $patched++
-            }
-            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(\s*BOOST_MPL_AUX_STATIC_CAST.*- 1\).*prior;') {
-              $lines[$i] = '    typedef AUX_WRAPPER_NAME prior;  // patched for clang 22'
-              $patched++
+            if ($lines[$i] -match '^\s*#else\s*$') { $inElseBranch = $true }
+            if ($lines[$i] -match '^\s*#endif') { $inElseBranch = $false }
+            if ($inElseBranch) {
+              if ($lines[$i] -match 'typedef AUX_WRAPPER_INST.*value \+ 1.*next;') {
+                $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
+                $patched++
+              }
+              if ($lines[$i] -match 'typedef AUX_WRAPPER_INST.*value - 1.*prior;') {
+                $lines[$i] = '    typedef AUX_WRAPPER_NAME prior;  // patched for clang 22'
+                $patched++
+              }
             }
           }
           Write-Host "Patched $patched lines in $header"
           if ($patched -eq 0) {
-            Write-Host "=== Lines 55-80 ==="
-            $lines[54..79] | ForEach-Object { Write-Host $_ }
-            throw "No target lines found"
+            throw "No target lines found in #else branch"
+          }
+          Write-Host "=== Lines 55-80 AFTER patch ==="
+          for ($j = 54; $j -lt [Math]::Min(80, $lines.Count); $j++) {
+            Write-Host ("{0,3}: {1}" -f ($j+1), $lines[$j])
           }
           $lines | Set-Content $header
 
