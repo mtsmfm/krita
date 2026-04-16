@@ -114,24 +114,43 @@ jobs:
           $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\mpl\aux_\integral_wrapper.hpp"
           if (-not (Test-Path $header)) { throw "Header not found: $header" }
           $lines = Get-Content $header
-          $patched = $false
+          $patched = 0
           for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST.*BOOST_MPL_AUX_STATIC_CAST.*value \+ 1.*next;') {
-              $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
-              $patched = $true
+            # Patch all branches: EDG workaround (N+1/N-1), Borland (N+1/N-1), and default (value+1/value-1)
+            # EDG branch: BOOST_STATIC_CONSTANT lines for next_value/prior_value
+            if ($lines[$i] -match 'BOOST_STATIC_CONSTANT\(AUX_WRAPPER_VALUE_TYPE,\s*next_value') {
+              $lines[$i] = '    // patched: removed next_value computation (clang 22 enum-constexpr)'
+              $patched++
             }
-            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST.*BOOST_MPL_AUX_STATIC_CAST.*value - 1.*prior;') {
+            if ($lines[$i] -match 'BOOST_STATIC_CONSTANT\(AUX_WRAPPER_VALUE_TYPE,\s*prior_value') {
+              $lines[$i] = '    // patched: removed prior_value computation (clang 22 enum-constexpr)'
+              $patched++
+            }
+            # All branches: typedef using next_value/prior_value or arithmetic
+            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(next_value\) next;') {
+              $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
+              $patched++
+            }
+            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(prior_value\) prior;') {
               $lines[$i] = '    typedef AUX_WRAPPER_NAME prior;  // patched for clang 22'
-              $patched = $true
+              $patched++
+            }
+            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(\s*BOOST_MPL_AUX_STATIC_CAST.*\+ 1\).*next;') {
+              $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
+              $patched++
+            }
+            if ($lines[$i] -match 'typedef AUX_WRAPPER_INST\(\s*BOOST_MPL_AUX_STATIC_CAST.*- 1\).*prior;') {
+              $lines[$i] = '    typedef AUX_WRAPPER_NAME prior;  // patched for clang 22'
+              $patched++
             }
           }
-          if (-not $patched) {
-            Write-Host "=== Lines 65-80 ==="
-            $lines[64..79] | ForEach-Object { Write-Host $_ }
-            throw "Target lines not found"
+          Write-Host "Patched $patched lines in $header"
+          if ($patched -eq 0) {
+            Write-Host "=== Lines 55-80 ==="
+            $lines[54..79] | ForEach-Object { Write-Host $_ }
+            throw "No target lines found"
           }
           $lines | Set-Content $header
-          Write-Host "Patched $header"
 
       - name: Build and install Krita
         shell: pwsh
