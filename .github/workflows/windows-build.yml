@@ -240,6 +240,19 @@ jobs:
             Write-Host "qtpaths.exe not found at $qtpaths"
           }
 
+      - name: Patch packaging script for MSYS2 CLANG64 runtime libs
+        shell: pwsh
+        run: |
+          # MSYS2 CLANG64 ships OpenSSL 3.x, not 1.1. The packaging script
+          # hardcodes OpenSSL 1.1 DLL names. Make all runtime lib copies
+          # conditional so missing libs are skipped instead of failing.
+          $script = Get-Content -Path "packaging\windows\package-complete.py" -Raw
+          $script = $script.Replace(
+            "if lib != 'libssp-0' or os.path.isfile(libPath):",
+            "if os.path.isfile(libPath):"
+          )
+          Set-Content -Path "packaging\windows\package-complete.py" -Value $script -NoNewline
+
       - name: Package Krita
         shell: pwsh
         env:
