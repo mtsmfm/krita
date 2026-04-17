@@ -113,39 +113,96 @@ jobs:
         run: |
           $header = "${{ github.workspace }}\_install\include\boost-1_80\boost\mpl\aux_\integral_wrapper.hpp"
           if (-not (Test-Path $header)) { throw "Header not found: $header" }
+          # The installed header has a KDE modification that activates the
+          # `#if BOOST_WORKAROUND(__EDG_VERSION__, <= 243) || __cplusplus >= 201103L` branch
+          # for all C++11+ compilers (including clang). That branch declares
+          #   BOOST_STATIC_CONSTANT(AUX_WRAPPER_VALUE_TYPE, prior_value = ... (N - 1));
+          # which clang 22 rejects for enum types at their lower bound because
+          # enum(-1) is outside the enum's representable range — a non-constant
+          # expression per C++17.
+          #
+          # Replace the branch body with type-dispatched typedefs: use self-type
+          # for enum types (avoiding the out-of-range instantiation), keep the
+          # arithmetic for integer types (so mpl::prior/mpl::next still work in
+          # boost::accumulators, boost::fusion, etc.).
           $lines = Get-Content $header
           Write-Host "=== Lines 55-80 BEFORE patch ==="
           for ($j = 54; $j -lt [Math]::Min(80, $lines.Count); $j++) {
             Write-Host ("{0,3}: {1}" -f ($j+1), $lines[$j])
           }
-          # Only patch the active #else branch (value+1 / value-1).
-          # EDG and Borland branches are inactive for clang and must NOT be touched
-          # (other boost code depends on mpl::prior/next working for integer types).
-          $inElseBranch = $false
-          $patched = 0
+
+          # Find the `private:` line after the `#if BOOST_WORKAROUND(__EDG_VERSION__`
+          $startIdx = -1
+          $endIdx = -1
           for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^\s*#else\s*$') { $inElseBranch = $true }
-            if ($lines[$i] -match '^\s*#endif') { $inElseBranch = $false }
-            if ($inElseBranch) {
-              if ($lines[$i] -match 'typedef AUX_WRAPPER_INST.*value \+ 1.*next;') {
-                $lines[$i] = '    typedef AUX_WRAPPER_NAME next;  // patched for clang 22'
-                $patched++
-              }
-              if ($lines[$i] -match 'typedef AUX_WRAPPER_INST.*value - 1.*prior;') {
-                $lines[$i] = '    typedef AUX_WRAPPER_NAME prior;  // patched for clang 22'
-                $patched++
+            if ($lines[$i] -match '^\s*private\s*:\s*$' -and $startIdx -eq -1) {
+              # Check the preceding line is the #if with __EDG_VERSION__
+              if ($i -ge 1 -and ($lines[$i-1] -match '__EDG_VERSION__|__cplusplus')) {
+                $startIdx = $i
+                # Find the matching #elif/#else/#endif
+                for ($k = $i + 1; $k -lt $lines.Count; $k++) {
+                  if ($lines[$k] -match '^\s*(#elif|#else|#endif)') { $endIdx = $k - 1; break }
+                }
+                break
               }
             }
           }
-          Write-Host "Patched $patched lines in $header"
-          if ($patched -eq 0) {
-            throw "No target lines found in #else branch"
+          if ($startIdx -lt 0 -or $endIdx -lt 0) { throw "Could not locate target block" }
+          Write-Host "Replacing lines $($startIdx+1)..$($endIdx+1)"
+
+          # Build the replacement using std::conditional + lazy instantiation.
+          # Class-scope partial specialization is not standard C++, so we use
+          # two class templates and pick via std::conditional. Only the selected
+          # template gets its body instantiated, so the enum-out-of-range
+          # instantiation of integral_c<enum, -1> is never triggered.
+          $replacement = @(
+            ' private:',
+            '    // patched for clang 22 enum-constexpr: type-dispatched next/prior',
+            '    template<class __U> struct __np_self_ {',
+            '        typedef AUX_WRAPPER_NAME next;',
+            '        typedef AUX_WRAPPER_NAME prior;',
+            '    };',
+            '    template<class __U> struct __np_arith_ {',
+            '        typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(__U, (N + 1)) ) next;',
+            '        typedef AUX_WRAPPER_INST( BOOST_MPL_AUX_STATIC_CAST(__U, (N - 1)) ) prior;',
+            '    };',
+            '    typedef typename ::std::conditional<',
+            '        ::std::is_enum<AUX_WRAPPER_VALUE_TYPE>::value,',
+            '        __np_self_<AUX_WRAPPER_VALUE_TYPE>,',
+            '        __np_arith_<AUX_WRAPPER_VALUE_TYPE>',
+            '    >::type __np_chosen_;',
+            ' public:',
+            '    typedef typename __np_chosen_::next next;',
+            '    typedef typename __np_chosen_::prior prior;'
+          )
+
+          $before = $lines[0..($startIdx-1)]
+          $after = $lines[($endIdx+1)..($lines.Count-1)]
+          $newLines = @() + $before + $replacement + $after
+
+          # Ensure <type_traits> is included (for std::is_enum)
+          $hasTypeTraits = $false
+          foreach ($line in $newLines) {
+            if ($line -match '#include\s+<type_traits>') { $hasTypeTraits = $true; break }
           }
-          Write-Host "=== Lines 55-80 AFTER patch ==="
-          for ($j = 54; $j -lt [Math]::Min(80, $lines.Count); $j++) {
-            Write-Host ("{0,3}: {1}" -f ($j+1), $lines[$j])
+          if (-not $hasTypeTraits) {
+            # Insert after the last existing #include
+            $lastInclude = -1
+            for ($i = 0; $i -lt $newLines.Count; $i++) {
+              if ($newLines[$i] -match '^#include') { $lastInclude = $i }
+              if ($newLines[$i] -match 'BOOST_MPL_AUX_ADL_BARRIER_NAMESPACE_OPEN') { break }
+            }
+            if ($lastInclude -ge 0) {
+              $newLines = @() + $newLines[0..$lastInclude] + '#include <type_traits>' + $newLines[($lastInclude+1)..($newLines.Count-1)]
+            }
           }
-          $lines | Set-Content $header
+
+          $newLines | Set-Content $header
+          Write-Host "=== Lines 55-95 AFTER patch ==="
+          $after_lines = Get-Content $header
+          for ($j = 54; $j -lt [Math]::Min(95, $after_lines.Count); $j++) {
+            Write-Host ("{0,3}: {1}" -f ($j+1), $after_lines[$j])
+          }
 
       - name: Build and install Krita
         shell: pwsh
